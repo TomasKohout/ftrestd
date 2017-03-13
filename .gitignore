@@ -26,3 +26,15 @@
 *.exe
 *.out
 *.app
+
+\.idea/
+
+cmake-build-debug/
+
+ftrestd
+
+help
+
+main
+
+CMakeLists\.txt
