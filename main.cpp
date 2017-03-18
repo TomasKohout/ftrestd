@@ -224,7 +224,7 @@ string getHead(string rest)
             else
                 path += rest[i];
         } //todo \t atd.
-        else if (rest[i] == '?') {
+        else if (rest[i] == '?' && flag == 0) {
             flag = 1;
         } else if (flag == 1 && rest[i] == '=') flag = 2;
         else if (flag == 2 && rest[i] != ' ') type += rest[i];
@@ -358,9 +358,9 @@ int reqForPut(int sock, int type, string path, string fsize, string data)
             err = createHeader(type, forbidden, alrExists.length(), forbidden);
             err += alrExists;
             writeSock(sock, err);
-            return ERR;
+            return OK;
         }
-        cout << path << endl;
+       //cout << path << endl;
         file = fopen(path.c_str(), "wb");
         if (file == NULL)
         {
@@ -535,7 +535,6 @@ int reqForGet(int sock, string path, int type)
             err += unknownErr;
             writeSock(sock, err);
         }
-        return ERR;
     }
 
     return OK;
@@ -601,7 +600,7 @@ int reqForDel(int sock, string path, int type)
         }
 
     }
-    return ERR;
+    return OK;
 }
 
 void serveMe(int sock, struct arg * arg) {
@@ -622,7 +621,7 @@ void serveMe(int sock, struct arg * arg) {
             break;
     }
 
-    if (fileOrFolder(testUser) == NOTH)
+    if (fileOrFolder(testUser) == NOTH )
     {
         if (cont->operation == "PUT" && cont->type == "file") {
             n = PUT;
@@ -636,12 +635,13 @@ void serveMe(int sock, struct arg * arg) {
             n = RMD;
         else if ( cont->operation == "GET" && cont->type == "folder")
             n = LST;
+
         err = createHeader(n , notF, userNotFound.length(), "text/plain" );
         err += userNotFound;
         writeSock(sock, err);
         close(sock);
         delete arg;
-        exit(ERR);
+        exit(OK);
     }
 
     path += cont->path;
