@@ -17,6 +17,7 @@
 #include <sstream>
 #include <fstream>
 #include <signal.h>
+#include <errno.h>
 
 #define OK 0
 #define ERR 1
@@ -37,9 +38,21 @@ vector<string> commands (arr, arr + 6) ;
 string arr2[] = {"-p", "-r"};
 vector<string> args (arr2, arr2+2);
 
-string ok = "HTTP/1.1 200 OK\n\r";
-string notF = "HTTP/1.1 404 Not Found\n\r";
-string badR = "HTTP/1.1 400 Bad Request\n\r";
+string ok           =   "HTTP/1.1 200 OK\r\n";
+string notF         =   "HTTP/1.1 404 Not Found\r\n";
+string badR         =   "HTTP/1.1 400 Bad Request\r\n";
+string forbidden    =   "HTTP/1.1 400 Bad Request\r\n";
+
+string intSerErr    =   "HTTP/1.1 500 Internal Server Error\r\n";
+string notADir      =   "Not a directory\n";
+string dirNotFound  =   "Directory not found\n";
+string dirNotEmpty  =   "Directory not empty\n";
+string alrExists    =   "Already exists\n";
+string notAFile     =   "Not a file\n";
+string fiNotFound   =   "File not found\n";
+string userNotFound =   "User Account Not Found\n";
+string unknownErr   =   "Unknown error.\n";
+
 
 void errMsg(const char *msg)
 {
@@ -50,6 +63,15 @@ struct arg{
     string rootDir;
     uint16_t portNum;
 };
+
+struct content {
+    string fsize;
+    string operation;
+    string path;
+    string type;
+};
+
+struct content *cont = new content;
 
 string getMIME(string localPath)
 {
@@ -102,6 +124,7 @@ struct arg* getParams (int argc, char *argv[])
     str->rootDir = getcwd(temp, PATH_MAX);
     if (argc == 3)
     {
+        argv[1][1] = tolower(argv[1][1]);
         if ( args[0].compare(argv[1]) == 0 && isdigit(*argv[2]))
         {
             char *t = NULL;
@@ -117,6 +140,8 @@ struct arg* getParams (int argc, char *argv[])
     }
     else if (argc == 5)
     {
+        argv[1][1] = tolower(argv[1][1]);
+        argv[3][1] = tolower(argv[3][1]);
         if ( args[0].compare(argv[1]) == 0 && args[1].compare(argv[3]) == 0)
         {
             if ( args[0].compare(argv[1]) == 0 )
@@ -170,133 +195,210 @@ struct arg* getParams (int argc, char *argv[])
     return str;
 
 }
-string readSock(int socket){
-    char buf[1024];
-    bzero(buf, 1024);
-    int n;
-    string rest;
-    n = (int) read(socket, buf, 1024);
-    rest = buf;
+
+string getHead(string rest)
+{
+    string fsize;
+    string operation;
+    string path;
+    string type;
+    int flag = 0;
+    int countOfN = 0;
+    for (string::size_type i = 0; i < rest.size(); i++) {
+        if (i < 3) {
+
+            operation += rest[i];
+            if (operation == "DEL")
+            {
+                i += 4;
+            }
+        }
+        else if (i != 3 && rest[i] != '?' && flag == 0)
+        {
+            if (rest[i] == '%' && rest[i+1] == '2' && rest[i+2] == '0')
+            {
+                path += " ";
+                i += 2;
+                continue;
+            }
+            else
+                path += rest[i];
+        } //todo \t atd.
+        else if (rest[i] == '?') {
+            flag = 1;
+        } else if (flag == 1 && rest[i] == '=') flag = 2;
+        else if (flag == 2 && rest[i] != ' ') type += rest[i];
+        else if (rest[i] == ' ' && flag == 2) flag = 3;
+        else if (rest[i] == '\n') countOfN++;
+        else if (countOfN == 5) {
+            if (isdigit(rest[i]))
+                fsize += rest[i];
+        }
+        else if (rest[i-3] == '\r' && rest[i-2] == '\n' && rest[i-1] == '\r' && rest[i] == '\n')
+        {
+            rest.erase(0,i+1);
+            break;
+        }
+    }
+    cont->fsize     =   fsize;
+    cont->operation =   operation;
+    cont->path      =   path;
+    cont->type      =   type;
+
     return rest;
+}
+
+string readSock(int socket){
+
+    char buff[1024];
+    string rcv;
+    int n = 0;
+    while(42) {
+        bzero(buff, 1024);
+        n = recv(socket, buff, 1024,0);
+        if (n > 0) {
+            rcv += string(buff,n);
+        }
+        else if (n == 0) {
+            break;
+        } else {
+            fprintf(stderr, "UNKNOWN ERROR\n");
+            exit(ERR);
+        }
+    }
+    return rcv;
 }
 
 int writeSock(int socket, string buf)
 {
-    int n = (int) write(socket, buf.c_str(), 1024);
-    if (n < 0) return ERR;
+    long size = buf.size();
+
+    while (size > 0)
+    {
+        int n = (int) send(socket, (void*)buf.data(), buf.size(),0);
+        shutdown(socket, SHUT_WR);
+        if (n <= 0) {
+            if (n == 0) {
+                errMsg("ERROR: disconnected");
+                return ERR;
+            }
+            else
+            {
+                errMsg("ERROR: nic nebylo zapsano");
+                return ERR;
+            }
+        }
+        size -= n;
+    }
+
     return OK;
 }
-string createHeader(int type)
+string createHeader(int type, string state, int size, string ctype)
 {
     char buf[1024];
     string rest;
     time_t now = time(0);
     tm tm = *gmtime(&now);
     strftime(buf, sizeof buf, "%a, %d %b %Y %H:%M:%S %Z", &tm);
+    stringstream ss;
+    ss << size;
+    string str = ss.str();
     switch (type)
     {
         case DEL:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: text/plain\n\rContent-Length: 0\n\rContent-Encoding: identity\n\r";
+            rest += "\r\nContent-Type: text/plain\r\nContent-Length: " + str + "\r\nContent-Encoding: identity\r\n\r\n";
             break;
 
         case RMD:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: text/plain\n\rContent-Length: 0\n\rContent-Encoding: identity\n\r";
+            rest += "\r\nContent-Type: text/plain\r\nContent-Length: " + str +  "\r\nContent-Encoding: identity\r\n\r\n";
             break;
         case GET:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: ";
+            rest += "\r\nContent-Type: " + ctype + "\r\nContent-Length: " + str +  "\r\nContent-Encoding: identity\r\n\r\n";
             break;
         case LST:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: text/plain\n\rContent-Length: ";
+            rest += "\r\nContent-Type: text/plain\r\nContent-Length: " + str+  "\r\nContent-Encoding: identity\r\n\r\n";
 
             break;
         case PUT:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: text/plain\n\rContent-Length: 0\n\rContent-Encoding: identity\n\r";
+            rest += "\r\nContent-Type: text/plain\r\nContent-Length: "+ str + "\r\nContent-Encoding: identity\r\n\r\n";
             break;
 
         case MKD:
-            rest.append(ok);
+            rest.append(state);
             rest += "Date: ";
             rest.append(buf);
-            rest += "\n\rContent-Type: text/plain\n\rContent-Length: 0\n\rContent-Encoding: identity\n\r";
+            rest += "\r\nContent-Type: text/plain\r\nContent-Length: "+ str + "\r\nContent-Encoding: identity\r\n\r\n";
             break;
     }
 
     return rest;
 }
-int reqForPut(int sock, int type, string path, string fsize)
+int reqForPut(int sock, int type, string path, string fsize, string data)
 {
-    char buff[1024];
-    int size = 0;
-    int n;
     FILE *file;
-    DIR * dir;
-    string rest;
-    cout << path << endl;
+    string err;
     if (type == PUT ) {
+        if (fileOrFolder(path) == FI)
+        {
+            err = createHeader(type, forbidden, alrExists.length(), forbidden);
+            err += alrExists;
+            writeSock(sock, err);
+            return ERR;
+        }
+        cout << path << endl;
         file = fopen(path.c_str(), "wb");
         if (file == NULL)
         {
-            errMsg("ERROR: could not open the path.");
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, intSerErr, unknownErr.length(), intSerErr);
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
-
-        while (atoi(fsize.c_str()) != size) {
-            bzero(buff, 1024);
-            int rec = (int) recv(sock, buff, 1024, 0);
-            if (rec < 0) {
-
-                errMsg("ERROR: nic neprijato nebo disconnect.");
-                remove(path.c_str());
-                fclose(file);
-                writeSock(sock, "Unknown error\n");
-                return ERR;
-            }
-
-            if (fwrite(buff, rec, 1, file) != 1) {
-                errMsg("ERROR: nelze zapsat do souboru");
-                remove(path.c_str());
-                fclose(file);
-                writeSock(sock, "Unknown error\n");
-                return ERR;
-            }
-            size += rec;
-        }
-
-        if (atoi(fsize.c_str()) != size)
-        {
-            errMsg("ERROR: wrong file");
-            remove(path.c_str());
-            fclose(file);
-            writeSock(sock, "Unknown error\n");
-            return ERR;
-        }
-
-        writeSock(sock, createHeader(type));
-
+        int size = (int) strtol(fsize.c_str(), NULL, 10);
+        fwrite(data.c_str(),1,size, file);
         fclose(file);
+        writeSock(sock, createHeader(type, ok, 0, ok));
+
     }
     else if ( type == MKD )
     {
         //todo mkdir, close socket, free?, exit, user handling
 
-        mkdir(path.c_str(), S_IRWXU | S_IRWXG );
-        writeSock(sock, createHeader(type));
+        int errH = mkdir(path.c_str(), S_IRWXU | S_IRWXG );
+        if (errH == 0)
+            writeSock(sock, createHeader(type, ok, 0, ok));
+        else if ( errno == EEXIST ) {
+            err = createHeader(type, badR, alrExists.length(), badR);
+            err += alrExists;
+            writeSock(sock, err);
+        }
+        else if ( errno == ENOENT)
+        {
+            err = createHeader(type, badR, dirNotFound.length(), badR);
+            err += dirNotFound;
+            writeSock(sock, err);
+        }
+        else
+        {
+            err = createHeader(type, badR, unknownErr.length(), badR);
+            err += unknownErr;
+            writeSock(sock, err);
+        }
 
     }
     else {
@@ -312,14 +414,17 @@ int reqForGet(int sock, string path, int type)
     long fsize, save;
     char buf[1024];
     char *content = NULL;
-    string rest = createHeader(type);
+    string rest;
+    string err;
 
     if(fileOrFolder(path) == FO && type == LST)
     {
         string a = "ls " + path;
         if ((mime = popen(a.c_str(), "r")) == NULL) {
             errMsg("ERROR popen neziskal ls");
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
 
@@ -330,31 +435,29 @@ int reqForGet(int sock, string path, int type)
         }
 
         fsize = mi.length();
-        stringstream ss;
-        ss << fsize;
-        string str = ss.str();
-        rest += str + "\n\rContent-Encoding: identity\n\r";
-
+        rest = createHeader(type, ok, fsize, ok);
+        rest += mi;
         writeSock(sock, rest);
-        writeSock(sock, mi);
 
     } else if (fileOrFolder(path) == FI && type == GET){
 
         file = fopen(path.c_str(), "rb");
         if ( file == NULL )
         {
-            errMsg("ERROR otevirani souboru");
-            writeSock(sock, "Unknown error\n");
+
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
+
             return ERR;
         }
-
-        rest += getMIME(path);
-        rest += "\rContent-Length: ";
 
         if (fseek(file, 0, SEEK_END) == -1)
         {
             errMsg("ERROR nelze dojit na konec souboru");
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
 
@@ -362,14 +465,13 @@ int reqForGet(int sock, string path, int type)
         if (fsize == -1)
         {
             errMsg("ERROR zadna velikost souboru");
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
 
-        stringstream ss;
-        ss << fsize;
-        string str = ss.str();
-        rest += str + "\n\rContent-Encoding: identity\n\r";
+
 
         rewind(file);
 
@@ -378,7 +480,9 @@ int reqForGet(int sock, string path, int type)
         {
             errMsg("ERROR nenaalokoval se prostor pro file");
             fclose(file);
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
         if (fread(content, fsize, 1, file) != 1)
@@ -386,69 +490,50 @@ int reqForGet(int sock, string path, int type)
             errMsg("ERROR soubor nebyl nacten");
             free(content);
             fclose(file);
-            writeSock(sock, "Unknown error\n");
+            err = createHeader(type, forbidden, unknownErr.length(), "text/plain");
+            err += unknownErr;
+            writeSock(sock, err);
             return ERR;
         }
+
+        rest = createHeader(type, ok, fsize, getMIME(path));
+        rest += string(content, fsize);
+        free(content);
         writeSock(sock, rest);
 
-        bzero(buf, 1024);
-
-        while (fsize > 0) {
-            int sent = (int) send(sock, content, fsize, 0);
-            if (sent <= 0) {
-                if (sent == 0)
-                {
-                    errMsg("ERROR disconnected");
-                    fclose(file);
-                    free(content-save);
-                    writeSock(sock, "Unknown error\n");
-                    return ERR;
-                }
-                else
-                {
-                    errMsg("ERROR nic nebylo zapsano");
-                    fclose(file);
-                    free(content-save);
-                    writeSock(sock, "Unknown error\n");
-                    return ERR;
-                }
-            }
-            content += sent;
-            fsize -= sent;
-            save += sent;
-        }
         fclose(file);
-        //free(content-save);
-        if (fsize != 0)
-        {
-            writeSock(sock, "Unknown error\n");
-            return ERR;
-        }
     }
     else
     {
-        cout <<  path << endl;
-
-        if (fileOrFolder(path) == 0 && type == GET)
+        if (fileOrFolder(path) == FI && type == LST)
         {
-            writeSock(sock, badR);
-            writeSock(sock, "Not a file.\n");
+            err = createHeader(type, badR, notADir.length(), badR);
+            err += notADir;
+            writeSock(sock, err);
         }
-        else if (fileOrFolder(path) == 1 && type == LST)
+        else if (fileOrFolder(path) == NOTH && type == LST)
         {
-            writeSock(sock, badR);
-            writeSock(sock, "Not a directory.\n");
+            err = createHeader(type, forbidden, dirNotFound.length(), forbidden);
+            err += dirNotFound;
+            writeSock(sock, err);
         }
-        else if (fileOrFolder(path) == 2 && type == LST)
+        else if ( fileOrFolder(path) == FO && type == GET)
         {
-            writeSock(sock, notF);
-            writeSock(sock, "Directory not found.\n");
-
+            err = createHeader(type, badR, notAFile.length(), "text/plain");
+            err += notAFile;
+            writeSock(sock, err);
         }
-        else if (fileOrFolder(path) == 2 && type == GET)
+        else if (fileOrFolder(path) == NOTH && type == GET)
         {
-            writeSock(sock, notF);
-            writeSock(sock, "File not found.\n");
+            err = createHeader(type, forbidden, fiNotFound.length(), "text/plain");
+            err += fiNotFound;
+            writeSock(sock, err);
+        }
+        else
+        {
+            err = createHeader(type, forbidden, unknownErr.length(), forbidden);
+            err += unknownErr;
+            writeSock(sock, err);
         }
         return ERR;
     }
@@ -457,30 +542,66 @@ int reqForGet(int sock, string path, int type)
 }
 int reqForDel(int sock, string path, int type)
 {
-    string rest = createHeader(type);
-
-    if (type == DEL && fileOrFolder(path) == FI)
+    string rest = createHeader(type, ok, 0 , ok);
+    string err;
+    int errH;
+    if (type == DEL)
     {
-        remove(path.c_str());
-        writeSock(sock, rest);
-    }
-    else if (type == RMD && fileOrFolder(path) == FO)
-    {
-
-        if (rmdir(path.c_str()) != 0)
+        if (fileOrFolder(path) == FI){
+            errH = remove(path.c_str());
+            writeSock(sock, rest);
+            return OK;
+        }
+        else if (fileOrFolder(path) == FO)
         {
-            errMsg("ERROR slozku se nepodarilo smazat");
-            writeSock(sock, badR);
-            return ERR;
+            err = createHeader(type, badR, notAFile.length(), badR);
+            err += notAFile;
+            writeSock(sock, err);
+
+        }
+        else if (fileOrFolder(path) == NOTH)
+        {
+            err = createHeader(type, notF, fiNotFound.length(), notF);
+            err += fiNotFound;
+            writeSock(sock, err);
         }
         else
         {
-            writeSock(sock, rest);
+            err = createHeader(type, forbidden, unknownErr.length(), forbidden);
+            err += unknownErr;
+            writeSock(sock, err);
         }
-    } else{
-        //todo error handle
     }
-    return OK;
+    else if (type == RMD )
+    {
+        errH = rmdir(path.c_str());
+
+        if (errH == 0)
+        {
+            writeSock(sock, rest);
+            return OK;
+        }
+        else if (fileOrFolder(path) == NOTH)
+        {
+            err = createHeader(type, notF, dirNotFound.length(), notF);
+            err += dirNotFound;
+            writeSock(sock, err);
+        }
+        else if (fileOrFolder(path) == FI)
+        {
+            err = createHeader(type, badR, notADir.length(), badR);
+            err += notADir;
+            writeSock(sock,err);
+        }
+        else if (errno == ENOTEMPTY)
+        {
+            err = createHeader(type, forbidden, dirNotEmpty.length(), forbidden);
+            err += dirNotEmpty;
+            writeSock(sock, err);
+        }
+
+    }
+    return ERR;
 }
 
 void serveMe(int sock, struct arg * arg) {
@@ -489,48 +610,58 @@ void serveMe(int sock, struct arg * arg) {
     string path = arg->rootDir;
     string type;
     string fsize;
+    string err;
     string rest = readSock(sock);
-    //cout << rest << endl;
-    int flag = 0;
-    int countOfN = 0;
-    for (string::size_type i = 0; i < rest.size(); i++) {
-        if (i < 3) {
-
-            operation += rest[i];
-            if (operation == "DEL")
-            {
-                i += 4;
-            }
-        }
-        else if (i != 3 && rest[i] != '?' && flag == 0) path += rest[i]; //todo \t atd.
-        else if (rest[i] == '?') {
-            flag = 1;
-        } else if (flag == 1 && rest[i] == '=') flag = 2;
-        else if (flag == 2 && rest[i] != ' ') type += rest[i];
-        else if (rest[i] == ' ' && flag == 2) flag = 3;
-        else if (rest[i] == '\n') countOfN++;
-        else if (countOfN == 5) {
-            if (isdigit(rest[i]))
-                fsize += rest[i];
-        }
+    rest = getHead(rest);
+    string testUser = arg->rootDir;
+    for (string::size_type i = 0; i < cont->path.length() ; i++)
+    {
+        if (i==0 || cont->path[i] != '/')
+            testUser += cont->path[i];
+        else
+            break;
     }
 
-    if (operation == "PUT" && type == "file") {
+    if (fileOrFolder(testUser) == NOTH)
+    {
+        if (cont->operation == "PUT" && cont->type == "file") {
+            n = PUT;
+        } else if (cont->operation == "GET" && cont->type == "file") {
+            n = GET;
+        } else if (cont->operation == "DEL" && cont->type == "file") {
+            n = DEL;
+        } else if (cont->operation == "PUT" && cont->type == "folder") {
+            n = MKD;
+        } else if (cont->operation == "DEL" && cont->type == "folder")
+            n = RMD;
+        else if ( cont->operation == "GET" && cont->type == "folder")
+            n = LST;
+        err = createHeader(n , notF, userNotFound.length(), "text/plain" );
+        err += userNotFound;
+        writeSock(sock, err);
+        close(sock);
+        delete arg;
+        exit(ERR);
+    }
+
+    path += cont->path;
+
+    if (cont->operation == "PUT" && cont->type == "file") {
         //path += "/text.txt";
-        n = reqForPut(sock, PUT, path, fsize);
-    } else if (operation == "GET" && type == "file") {
+        n = reqForPut(sock, PUT, path, cont->fsize, rest);
+    } else if (cont->operation == "GET" && cont->type == "file") {
         //path += "/k.deb";
         n = reqForGet(sock, path, GET);
-    } else if (operation == "DEL" && type == "file") {
+    } else if (cont->operation == "DEL" && cont->type == "file") {
         //path += "/k.deb";
         n = reqForDel(sock, path, DEL);
-    } else if (operation == "PUT" && type == "folder") {
-        n = reqForPut(sock, MKD, path, fsize);
-    } else if (operation == "DEL" && type == "folder")
+    } else if (cont->operation == "PUT" && cont->type == "folder") {
+        n = reqForPut(sock, MKD, path, cont->fsize, rest);
+    } else if (cont->operation == "DEL" && cont->type == "folder")
     {
         n = reqForDel(sock, path, RMD);
     }
-    else if ( operation == "GET" && type == "folder")
+    else if ( cont->operation == "GET" && cont->type == "folder")
     {
         n = reqForGet(sock, path, LST);
     }
